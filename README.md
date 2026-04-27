@@ -54,9 +54,14 @@ chromium-fourier/
 │   └── patches/
 │       ├── enable-v4l2-decoder-default.patch
 │       └── wayland-allow-direct-egl-gles2.patch
-└── rk3588/                    # RK3588 (Mali-G610 panthor) — scaffolded
-    ├── PKGBUILD
-    └── patches/               # same two patches as pinetab2/
+├── rk3588/                    # RK3588 (Mali-G610 panthor) — validated
+│   ├── PKGBUILD               # launcher leaves Vulkan enabled
+│   └── patches/               # same two patches
+│       ├── enable-v4l2-decoder-default.patch
+│       └── wayland-allow-direct-egl-gles2.patch
+└── rk3399/                    # RK3399 (Mali-T860 panfrost) — validated
+    ├── PKGBUILD               # launcher Vulkan-disabled (no panvk)
+    └── patches/               # same two patches
         ├── enable-v4l2-decoder-default.patch
         └── wayland-allow-direct-egl-gles2.patch
 ```
@@ -79,9 +84,15 @@ Per-board status:
   delta likely reflects the AR24 conversion still being in the path
   on panthor + ANGLE — same dmabuf zero-copy work that's open on
   PineTab2 applies here.
-- **`rk3399/`** (planned) — Pinebook Pro / Rock Pi 4 / etc.
-  Mali-T860 Midgard panfrost; H.264 only via `hantro`. Same patches;
-  Vulkan-default-disabled stance correct (Midgard has no Vulkan).
+- **`rk3399/`** — same patches, same gn args. **V4L2 dispatch
+  validated on RK3399 (Pinebook Pro / Mali-T860 / panfrost / mainline
+  kernel + KDE Wayland)**: same v2 binary as PineTab2 and RK3588, no
+  rebuild — patches are board-agnostic. `Selected V4L2VideoDecoder,
+  codec: h264 main, fourcc: S264`, `/dev/video1` + `/dev/media0` open
+  in GPU process. Mali-T860 is Midgard generation, which panvk does
+  not and will never support (panvk targets Bifrost-gen2+ and
+  Valhall), so the rk3399 launcher stays Vulkan-default-disabled
+  permanently — same stance as PineTab2 but for a different reason.
 
 A separate Firefox-side effort (different patch shape — Firefox has
 its own `media-rdd` / `RemoteVideoDecoder` plumbing for V4L2) will
