@@ -43,8 +43,12 @@ chromium-fourier/
 ├── README.md
 ├── LICENSE
 ├── docs/
-│   └── playback-howto.md      # mainline V4L2 video playback (mpv,
-│                              # gstreamer, ffplay) — the dmabuf wall
+│   ├── playback-howto.md      # mainline V4L2 video playback (mpv,
+│   │                          # gstreamer, ffplay) — the dmabuf wall
+│   └── dmabuf-zero-copy.md    # NV12 external_only investigation;
+│                              # ecosystem-wide writeup
+├── tools/
+│   └── dmabuf-modifiers.c     # tiny EGL modifier-table dumper
 ├── pinetab2/                  # RK3566 (Mali-G52 panfrost) — validated
 │   ├── PKGBUILD
 │   └── patches/
