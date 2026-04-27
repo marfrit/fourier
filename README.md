@@ -62,11 +62,19 @@ Per-board status:
 - **`pinetab2/`** — **validated end-to-end** on PineTab2 (RK3566 /
   Mali-G52 Bifrost / panfrost). 1080p30 H.264 plays at ~46 % combined
   CPU vs ~85 % renderer-only with the stock fallback.
-- **`rk3588/`** — scaffolded; same patches, same gn args. **Validation
-  pending on RK3588 hardware** (Mali-G610 Valhall / panthor + panvk
-  for Vulkan, `hantro` for H.264, `rkvdec2` for AV1 / HEVC / VP9).
-  Differences vs PineTab2 are launcher-only: Vulkan stays enabled
-  because panvk on Valhall is functional.
+- **`rk3588/`** — same patches, same gn args. **V4L2 dispatch
+  validated on RK3588 (CoolPi 4 / Arch / Mali-G610 Valhall /
+  panthor / mainline kernel + KDE Wayland)**: same v2 binary as
+  PineTab2, no rebuild — patches are board-agnostic.
+  `Selected V4L2VideoDecoder, codec: h264 main, fourcc: S264`,
+  `/dev/video0` + `/dev/media0` open in GPU process. panvk Vulkan
+  probe completes cleanly on Valhall (no `VK_ERROR_INCOMPATIBLE_DRIVER`
+  unlike Bifrost-gen2 on RK3566), so the rk3588 launcher leaves
+  Vulkan enabled. CPU during 1080p30 H.264 playback is ~75 %
+  combined across chrome procs, higher than PineTab2's ~46 %; the
+  delta likely reflects the AR24 conversion still being in the path
+  on panthor + ANGLE — same dmabuf zero-copy work that's open on
+  PineTab2 applies here.
 - **`rk3399/`** (planned) — Pinebook Pro / Rock Pi 4 / etc.
   Mali-T860 Midgard panfrost; H.264 only via `hantro`. Same patches;
   Vulkan-default-disabled stance correct (Midgard has no Vulkan).
