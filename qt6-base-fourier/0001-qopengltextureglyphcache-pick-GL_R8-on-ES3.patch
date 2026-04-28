@@ -1,0 +1,43 @@
+diff --git a/src/opengl/qopengltextureglyphcache.cpp b/src/opengl/qopengltextureglyphcache.cpp
+index 0bab710b..46bad551 100644
+--- a/src/opengl/qopengltextureglyphcache.cpp
++++ b/src/opengl/qopengltextureglyphcache.cpp
+@@ -108,14 +108,20 @@ void QOpenGLTextureGlyphCache::createTextureData(int width, int height)
+         for (int i = 0; i < data.size(); ++i)
+             data[i] = 0;
+ #if !QT_CONFIG(opengles2)
+         const GLint internalFormat = isCoreProfile() ? GL_R8 : GL_ALPHA;
+         const GLenum format = isCoreProfile() ? GL_RED : GL_ALPHA;
+ #else
+-        const GLint internalFormat = GL_ALPHA;
+-        const GLenum format = GL_ALPHA;
++        // qt6-base-fourier: OpenGL ES 3.x removed GL_ALPHA from
++        // glTexImage2D's valid internalFormat list (ES 3 spec
++        // section 3.8.3, table 3.13). Pick GL_R8 + matching format
++        // when the runtime context is ES 3 or newer; only legacy
++        // ES 2 contexts fall through to the historic GL_ALPHA path.
++        const bool useR8 = ctx->format().majorVersion() >= 3;
++        const GLint internalFormat = useR8 ? GL_R8 : GL_ALPHA;
++        const GLenum format = useR8 ? GL_RED : GL_ALPHA;
+ #endif
+         funcs->glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, format, GL_UNSIGNED_BYTE, &data[0]);
+     }
+ 
+     funcs->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+     funcs->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+@@ -210,13 +216,14 @@ static void load_glyph_image_to_texture(QOpenGLContext *ctx,
+     } else {
+         // The scanlines in image are 32-bit aligned, even for mono or 8-bit formats. This
+         // is good because it matches the default of 4 bytes for GL_UNPACK_ALIGNMENT.
+ #if !QT_CONFIG(opengles2)
+         const GLenum format = isCoreProfile() ? GL_RED : GL_ALPHA;
+ #else
+-        const GLenum format = GL_ALPHA;
++        // qt6-base-fourier: ES 3 path — see createTextureData() above.
++        const GLenum format = ctx->format().majorVersion() >= 3 ? GL_RED : GL_ALPHA;
+ #endif
+         funcs->glTexSubImage2D(GL_TEXTURE_2D, 0, tx, ty, imgWidth, imgHeight, format, GL_UNSIGNED_BYTE, img.constBits());
+     }
+ }
+ 
+ static void load_glyph_image_region_to_texture(QOpenGLContext *ctx,

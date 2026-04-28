@@ -1,0 +1,89 @@
+From: Markus Fritsche <mfritsche@reauktion.de>
+Subject: [PATCH] transaction: bypass watchDmaBuf implicit-sync fence wait
+Date: 2026-04-28
+
+Background
+----------
+KWin's `Transaction::watchDmaBuf` (src/wayland/transaction.cpp) calls
+`DMA_BUF_IOCTL_EXPORT_SYNC_FILE` on every plane of every imported
+dmabuf and parks the transaction on a `QSocketNotifier(POLLIN)`
+waiting for the resulting sync_file fd to become readable. The intent
+is correct in principle — wait for the producer to finish writing
+before sampling — but on V4L2 hantro CAPTURE buffers (RK3566 mainline
+6.19, panfrost mesa 26.0.5) the resulting fence either signals so
+late that chrome's 6-buffer V4L2 capture pool exhausts, or never
+signals at all. Symptom (per chromium-fourier KWIN_PIVOT.md):
+
+- chrome v4 attaches a video frame to a wp_subsurface, commits
+- KWin's Transaction::commit calls watchDmaBuf, exports a sync_file,
+  parks on QSocketNotifier
+- Sync_file never becomes readable
+- Transaction never applies; old surface state never replaced
+- wl_buffer.release for the previous video buffer never sent
+- chrome's V4L2 capture pool starves at ~6 seconds, decoder blocks,
+  audio drains, hard stall
+
+mpv with `--vo=gpu-next` on the same KWin session slideshows at 76%
+drop rate but does not deadlock — its single-surface attach pattern
+hits a different transaction shape than chrome's subsurface flow.
+
+A clean weston A/B with the same chrome v4 binary plays through
+end-to-end: the bug is specifically KWin's transaction fence-wait
+path on this stack, not Wayland-as-a-protocol.
+
+Fix
+---
+This experimental patch no-ops `watchDmaBuf` to test the hypothesis.
+Implicit-sync correctness in this case is not lost: the V4L2
+producer guarantees the buffer's contents are complete before
+chrome sends `wl_surface.attach + commit`, and the wp_linux_dmabuf
+client is required to do so by spec. The fence-wait was a defensive
+optimization for misbehaving clients, not a correctness primitive.
+
+If chrome plays through end-to-end at the recorded 34.7% combined
+CPU number under KWin with this patch, the bug is confirmed and the
+upstream fix can be refined (timeout, V4L2-source skip, or use the
+dmabuf fd directly in the QSocketNotifier instead of an extra
+exported sync_file).
+
+diff --git a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
+index 967b22b..e3fbc06 100644
+--- a/src/wayland/transaction.cpp
++++ b/src/wayland/transaction.cpp
+@@ -263,27 +263,18 @@ static FileDescriptor exportWaitSyncFile(const FileDescriptor &fileDescriptor)
+     return FileDescriptor{};
+ }
+ #endif
+ 
+ void Transaction::watchDmaBuf(TransactionEntry *entry)
+ {
+-#if defined(Q_OS_LINUX)
+-    const DmaBufAttributes *attributes = entry->buffer->dmabufAttributes();
+-    if (!attributes) {
+-        return;
+-    }
+-
+-    for (int i = 0; i < attributes->planeCount; ++i) {
+-        const FileDescriptor &fileDescriptor = attributes->fd[i];
+-        if (fileDescriptor.isReadable()) {
+-            continue;
+-        }
+-
+-        auto syncFile = exportWaitSyncFile(fileDescriptor);
+-        if (syncFile.isValid()) {
+-            entry->fences.emplace_back(std::make_unique<TransactionFence>(this, std::move(syncFile)));
+-        }
+-    }
+-#endif
++    // kwin-fourier: no-op the implicit-sync fence wait. On V4L2
++    // hantro CAPTURE buffers (RK3566 mainline 6.19, panfrost mesa
++    // 26.0.5) the DMA_BUF_IOCTL_EXPORT_SYNC_FILE fence either never
++    // signals or signals so late that chrome's V4L2 capture pool
++    // exhausts at ~6s, hard-stalling the decoder. Wayland clients
++    // are required by spec to ensure the buffer's contents are
++    // complete before wl_surface.attach+commit, so this fence-wait
++    // is a belt-and-braces optimization, not a correctness primitive.
++    Q_UNUSED(entry);
+ }
+ 
+ } // namespace KWin

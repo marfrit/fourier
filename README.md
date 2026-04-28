@@ -1,8 +1,5 @@
 # fourier
 
-> *(repo currently named `chromium-fourier`; rename to `fourier` is
-> pending the dust settling on the wider patch series)*
-
 A campaign of patches that makes mainline-Linux Wayland video playback
 on ARM Rockchip SoCs **work end-to-end on a "boring upstream" stack**
 — no vendor MPP, no Mali blob, no `panfork`, no 5.10 BSP kernel, no
@@ -11,8 +8,8 @@ conversion in the renderer.
 
 Started as one patch series for chromium V4L2 hardware decode.
 Became four, because each layer of the stack had its own contributing
-bug. The patches each live in their own directory of this repo (or
-will, once the planned rename + restructure happens — see "Repository
+bug. The patches each live in their own directory of this repo — see
+"Repository
 plan" below).
 
 ## What we found, layer by layer
@@ -43,52 +40,37 @@ mainline kernel 6.19.10) with the full patch chain installed:
   watchDmaBuf bypass is a general-purpose latency reduction for
   every wp_linux_dmabuf client on this hardware.
 
-## Repository plan
-
-The current github layout still reflects the chromium-only origin:
+## Repository layout
 
 ```
-chromium-fourier/               (this repo — renaming planned)
+fourier/
 ├── README.md                   (this file)
 ├── LICENSE
 ├── docs/
-│   ├── dmabuf-zero-copy.md     # NV12 external_only investigation,
-│   │                           # now also chronicles the rest
+│   ├── dmabuf-zero-copy.md     # NV12 external_only investigation;
+│   │                           # chronicles the full discovery thread
 │   └── playback-howto.md       # mpv / gstreamer / ffmpeg recipes
 ├── tools/
 │   └── dmabuf-modifiers.c      # tiny EGL modifier-table dumper
-├── pinetab2/                   # RK3566 / Mali-G52 / panfrost — validated
-├── rk3399/                     # RK3399 / Mali-T860 / panfrost — validated
-└── rk3588/                     # RK3588 / Mali-G610 / panthor  — validated
+├── chromium-fourier/           # 4 patches; per-board PKGBUILD
+│   ├── pinetab2/               #   RK3566 / Mali-G52 / panfrost — validated
+│   ├── rk3399/                 #   RK3399 / Mali-T860 / panfrost — validated
+│   └── rk3588/                 #   RK3588 / Mali-G610 / panthor  — validated
+├── qt6-base-fourier/           # 3 patches against qtbase 6.11.0
+│   └── PKGBUILD                # pacman epoch=1 to dominate Arch's pkgrel
+└── kwin-fourier/               # 1 patch against kwin 6.6.4 (diagnostic)
+    └── PKGBUILD                # pacman epoch=1
 ```
 
-Each board directory carries a PKGBUILD plus the four chromium
-patches. The PKGBUILDs target pacman / Arch Linux ARM but the
-patches themselves are board-agnostic and apply unchanged to a
-vanilla upstream chromium tree.
+Each `*-fourier/` subdirectory carries a `PKGBUILD` plus the patch
+files. The PKGBUILDs target pacman / Arch Linux (ARM and x86_64);
+the patches themselves are distribution-agnostic and apply unchanged
+to vanilla upstream sources.
 
-The qt6-base-fourier and kwin-fourier patch series live in a
-sibling project repo today — those are the target of the planned
-rename + restructure, after which the layout becomes:
-
-```
-fourier/                        (renamed)
-├── README.md
-├── chromium-fourier/           (current pinetab2/ rk3399/ rk3588/)
-├── qt6-base-fourier/           (currently in marfrit-packages)
-├── kwin-fourier/               (currently in marfrit-packages)
-└── docs/, tools/               (kept)
-```
-
-In the meantime, the qt6-base-fourier and kwin-fourier sources are
-maintained at https://git.reauktion.de/marfrit/marfrit-packages
-under `arch/qt6-base-fourier/` and `arch/kwin-fourier/`. They will
-move into this repo when the rename happens.
-
-## Building (chromium part, today)
+## Building
 
 ```sh
-cd pinetab2          # or rk3399, rk3588
+cd chromium-fourier/pinetab2     # or rk3399, rk3588
 makepkg -si
 ```
 
@@ -100,9 +82,18 @@ the RAM-to-disk swap headroom that pacman's normal heuristics
 suggest. Cross-compiling from x86_64 (the `target_cpu="x64"` branch
 in the same PKGBUILD) is significantly faster.
 
-For the qt6-base-fourier and kwin-fourier components see the
-respective READMEs in `arch/qt6-base-fourier/` and
-`arch/kwin-fourier/` of the marfrit-packages gitea repo for now.
+For the Qt 6 and KWin components:
+
+```sh
+cd qt6-base-fourier && makepkg -si
+cd kwin-fourier && makepkg -si
+```
+
+Both inherit from their upstream Arch packaging and apply just the
+fourier patches on top, so they're proportionally cheap rebuilds
+(qt6-base ~30 min on aarch64, kwin ~15 min). Both bump epoch=1 so
+they dominate normal Arch upstream pkgrel updates until the patches
+land upstream.
 
 ## Patches (chromium part)
 

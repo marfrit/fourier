@@ -1,0 +1,33 @@
+diff --git a/src/gui/rhi/qrhigles2.cpp b/src/gui/rhi/qrhigles2.cpp
+index 5208bd4d..a2625949 100644
+--- a/src/gui/rhi/qrhigles2.cpp
++++ b/src/gui/rhi/qrhigles2.cpp
+@@ -1367,18 +1367,25 @@ static inline void toGlTextureFormat(QRhiTexture::Format format, const QRhiGles2
+     case QRhiTexture::RG8:
+         *glintformat = GL_RG8;
+         *glsizedintformat = *glintformat;
+         *glformat = GL_RG;
+         *gltype = GL_UNSIGNED_BYTE;
+         break;
+-    case QRhiTexture::RED_OR_ALPHA8:
+-        *glintformat = caps.coreProfile ? GL_R8 : GL_ALPHA;
++    case QRhiTexture::RED_OR_ALPHA8: {
++        // qt6-base-fourier: GL_ALPHA was removed from the valid
++        // glTexImage2D internalFormat list in OpenGL ES 3.0 (ES 3
++        // spec section 3.8.3). Pick GL_R8 + GL_RED for desktop GL
++        // Core profile and for any ES 3 or newer context; only
++        // legacy ES 2 contexts retain GL_ALPHA.
++        const bool useR8 = caps.coreProfile || (caps.gles && caps.ctxMajor >= 3);
++        *glintformat = useR8 ? GL_R8 : GL_ALPHA;
+         *glsizedintformat = *glintformat;
+-        *glformat = caps.coreProfile ? GL_RED : GL_ALPHA;
++        *glformat = useR8 ? GL_RED : GL_ALPHA;
+         *gltype = GL_UNSIGNED_BYTE;
+         break;
++    }
+     case QRhiTexture::RGBA16F:
+         *glintformat = GL_RGBA16F;
+         *glsizedintformat = *glintformat;
+         *glformat = GL_RGBA;
+         *gltype = GL_HALF_FLOAT;
+         break;

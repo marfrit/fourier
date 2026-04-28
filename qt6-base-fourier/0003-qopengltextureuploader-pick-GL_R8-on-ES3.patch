@@ -1,0 +1,51 @@
+diff --git a/src/opengl/qopengltextureuploader.cpp b/src/opengl/qopengltextureuploader.cpp
+index 3dca0a43..5d650523 100644
+--- a/src/opengl/qopengltextureuploader.cpp
++++ b/src/opengl/qopengltextureuploader.cpp
+@@ -246,17 +246,24 @@ qsizetype QOpenGLTextureUploader::textureImage(GLenum target, const QImage &imag
+             // Always needs conversion
+             break;
+         } else if (options & UseRedForAlphaAndLuminanceBindOption) {
+             externalFormat = internalFormat = GL_RED;
+             pixelType = GL_UNSIGNED_BYTE;
+             targetFormat = image.format();
+-        } else if (context->isOpenGLES() || context->format().profile() != QSurfaceFormat::CoreProfile) {
++        } else if ((context->isOpenGLES() && context->format().majorVersion() < 3)
++                   || (!context->isOpenGLES() && context->format().profile() != QSurfaceFormat::CoreProfile
++                       && !funcs->hasOpenGLExtension(QOpenGLExtensions::TextureSwizzle))) {
++            // qt6-base-fourier: only true ES 2 (or pre-3.3 desktop
++            // compat without the swizzle extension) reaches the
++            // GL_ALPHA fallback. ES 3+ falls through to the swizzle
++            // path below — TextureSwizzle is core in ES 3.0.
+             externalFormat = internalFormat = GL_ALPHA;
+             pixelType = GL_UNSIGNED_BYTE;
+             targetFormat = image.format();
+-        } else if (funcs->hasOpenGLExtension(QOpenGLExtensions::TextureSwizzle)) {
++        } else if (funcs->hasOpenGLExtension(QOpenGLExtensions::TextureSwizzle)
++                   || (context->isOpenGLES() && context->format().majorVersion() >= 3)) {
+             funcs->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_ALPHA);
+             funcs->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_ZERO);
+             funcs->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_ZERO);
+             funcs->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ZERO);
+             externalFormat = internalFormat = GL_RED;
+             pixelType = GL_UNSIGNED_BYTE;
+@@ -268,13 +275,18 @@ qsizetype QOpenGLTextureUploader::textureImage(GLenum target, const QImage &imag
+             // Always needs conversion
+             break;
+         } else if (options & UseRedForAlphaAndLuminanceBindOption) {
+             externalFormat = internalFormat = GL_RED;
+             pixelType = GL_UNSIGNED_BYTE;
+             targetFormat = image.format();
+-        } else if (context->isOpenGLES() || context->format().profile() != QSurfaceFormat::CoreProfile) {
++        } else if ((context->isOpenGLES() && context->format().majorVersion() < 3)
++                   || (!context->isOpenGLES() && context->format().profile() != QSurfaceFormat::CoreProfile
++                       && !funcs->hasOpenGLExtension(QOpenGLExtensions::TextureSwizzle))) {
++            // qt6-base-fourier: same reasoning as the Format_Alpha8
++            // branch above — GL_LUMINANCE is also gone from ES 3
++            // glTexImage2D internalFormats.
+             externalFormat = internalFormat = GL_LUMINANCE;
+             pixelType = GL_UNSIGNED_BYTE;
+             targetFormat = image.format();
+         } else if (funcs->hasOpenGLExtension(QOpenGLExtensions::TextureSwizzle)) {
+             funcs->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_RED);
+             funcs->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_RED);

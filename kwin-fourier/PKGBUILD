@@ -1,0 +1,125 @@
+# Maintainer: Markus Fritsche <mfritsche@reauktion.de>
+# Upstream maintainers: Felix Yan, Antonio Rojas
+# Contributor: Andrea Scarpino <andrea@archlinux.org>
+#
+# kwin-fourier — KWin 6.6.4 with the V4L2-stateless implicit-sync
+# transaction wait bypass. Hypothesis: KWin's
+# `Transaction::watchDmaBuf` calls DMA_BUF_IOCTL_EXPORT_SYNC_FILE on
+# every plane of every imported dmabuf and parks the transaction on a
+# QSocketNotifier waiting for the resulting sync_file fd to become
+# readable. For V4L2 hantro CAPTURE buffers on RK3566 mainline 6.19,
+# that fence either never signals or signals so late that chrome's
+# 6-buffer V4L2 capture pool exhausts at ~6 seconds, blocking the
+# decoder. mpv (single-surface attach pattern) merely slideshows
+# under KWin (76% drop rate); chrome (subsurface attach) deadlocks.
+#
+# This experimental build no-ops `watchDmaBuf` to test the
+# hypothesis. If chrome plays through end-to-end at the recorded
+# 34.7% CPU number, the bug is confirmed and the upstream fix can be
+# refined (e.g., short timeout, skip-on-V4L2, or use the dmabuf fd
+# directly without exporting an extra sync_file). See
+# ../chromium-fourier/KWIN_PIVOT.md for the full diagnosis thread.
+
+pkgname=kwin
+pkgver=6.6.4
+_dirver=$(echo $pkgver | cut -d. -f1-3)
+pkgrel=1
+epoch=1
+arch=(aarch64 x86_64)
+url='https://kde.org/plasma-desktop/'
+license=(LGPL-2.0-or-later)
+depends=(aurorae
+         breeze
+         gcc-libs
+         glibc
+         iio-sensor-proxy
+         plasma-activities
+         kauth
+         kcmutils
+         kcolorscheme
+         kconfig
+         kcoreaddons
+         kcrash
+         kdbusaddons
+         kdeclarative
+         kdecoration
+         kglobalaccel
+         kglobalacceld
+         kguiaddons
+         ki18n
+         kidletime
+         kirigami
+         kitemmodels
+         knewstuff
+         knighttime
+         knotifications
+         kpackage
+         kquickcharts
+         kscreenlocker
+         kservice
+         ksvg
+         kwayland
+         kwidgetsaddons
+         kwindowsystem
+         kxmlgui
+         lcms2
+         libcanberra
+         libdisplay-info
+         libdrm
+         libei
+         libepoxy
+         libevdev
+         libinput
+         libpipewire
+         libqaccessibilityclient-qt6
+         libxcb
+         libxcvt
+         libxkbcommon
+         mesa
+         milou
+         pipewire-session-manager
+         libplasma
+         qt6-5compat
+         qt6-base
+         qt6-declarative
+         qt6-svg
+         qt6-tools
+         systemd-libs
+         wayland
+         xcb-util-keysyms
+         xcb-util-wm)
+makedepends=(extra-cmake-modules
+             kdoctools
+             krunner
+             plasma-wayland-protocols
+             python
+             wayland-protocols
+             xorg-xwayland)
+optdepends=('plasma-keyboard: virtual keyboard')
+groups=(plasma)
+source=(https://download.kde.org/stable/plasma/$_dirver/$pkgname-$pkgver.tar.xz{,.sig}
+        0001-transaction-bypass-watchDmaBuf-fence-wait.patch)
+sha256sums=('3f9439760580a977d018daf4b35b62e5a1700def7b21c8dfbfc789d21378d7ad'
+            'SKIP'
+            'SKIP')
+validpgpkeys=('E0A3EB202F8E57528E13E72FD7574483BB57B18D'  # Jonathan Esk-Riddell <jr@jriddell.org>
+              '0AAC775BB6437A8D9AF7A3ACFE0784117FBCE11D'  # Bhushan Shah <bshah@kde.org>
+              'D07BD8662C56CB291B316EB2F5675605C74E02CF'  # David Edmundson <davidedmundson@kde.org>
+              '90A968ACA84537CC27B99EAF2C8DF587A6D4AAC1'  # Nicolas Fella <nicolas.fella@kde.org>
+              '1FA881591C26B276D7A5518EEAAF29B42A678C20') # Marco Martin <notmart@gmail.com>
+
+prepare() {
+  patch -d $pkgname-$pkgver -p1 < 0001-transaction-bypass-watchDmaBuf-fence-wait.patch
+}
+
+build() {
+  cmake -B build  -S $pkgname-$pkgver \
+    -DCMAKE_INSTALL_LIBEXECDIR=lib \
+    -DBUILD_TESTING=OFF
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  setcap CAP_SYS_NICE=+ep "$pkgdir"/usr/bin/kwin_wayland
+}
