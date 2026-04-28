@@ -182,3 +182,92 @@ would help the most consumers:
 The chromium-fourier project's contribution is the documentation
 above (this file) and the probe tool (`tools/dmabuf-modifiers.c`).
 The chromium upstream patch is on the followup list.
+
+## Status update (2026-04-28) — patch 3/3 landed and validated
+
+Item #1 of the "Upstream-targetable next moves" list is now done in
+this repo as
+`{pinetab2,rk3399,rk3588}/patches/nv12-external-oes-on-modifier-external-only.patch`.
+
+The fix is small and surgical. `OzoneImageGLTexturesHolder::GetBinding`
+already had a branch that picks `GL_TEXTURE_EXTERNAL_OES` when the
+SharedImageFormat carries `PrefersExternalSampler` — but that flag is
+only set for the generic Linux multi-plane case, not for NV12 dmabufs
+arriving from V4L2 producers via the standard ozone pixmap path. The
+patch adds a second predicate: also pick `EXTERNAL_OES` when the EGL
+driver advertises the pixmap's actual modifier as `external_only` for
+that fourcc. A new helper
+`NativePixmapEGLBinding::ModifierRequiresExternalOES` queries
+`eglQueryDmaBufModifiersEXT` and caches the answer per
+`(fourcc, modifier)` tuple — the EGL round-trip happens once per
+unique format+modifier combination in the GPU process lifetime, not
+once per frame. Skia Ganesh handles `GL_TEXTURE_EXTERNAL_OES`
+natively via `GrGLTextureInfo.fTarget`, so no shader changes are
+required. ~+90 lines, zero deletions.
+
+### Validation: ohm (PineTab2 / RK3566 / hantro mainline 6.19.10)
+
+`bbb_1080p30_h264.mp4` played through `chromium-fourier-149-r2` (with
+patch 3/3) on Wayland, `--use-gl=angle --use-angle=gles
+--enable-features=AcceleratedVideoDecoder`. Visual integrity was
+clean — no garble, no color regression, no blank frames.
+
+```
+=== chrome process CPU during steady-state 1080p30 H.264 playback ===
+PID  PCPU  COMMAND
+4951  11.9  chrome (browser)
+5005   9.0  chrome --type=gpu-process
+5017   5.8  chrome --type=utility (NetworkService)
+5087   5.5  chrome --type=renderer (the bbb tab)
+5204   0.9  chrome --type=utility (AudioService)
+
+chrome combined: 34.7%   (vs. pre-patch baseline ~131% — ~3.8× reduction)
+```
+
+Decoder log confirms the V4L2 stateless path stayed engaged:
+```
+V4L2VideoDecoder()
+InitializeBackend(): Using a stateless API for profile: h264 main and fourcc: S264
+SetupInputFormat(): Input (OUTPUT queue) Fourcc: S264
+AllocateInputBuffers(): Requesting: 17 OUTPUT buffers of type V4L2_MEMORY_MMAP
+SetupOutputFormat(): Output (CAPTURE queue) candidate: NV12
+ContinueChangeResolution(): Requesting: 6 CAPTURE buffers of type V4L2_MEMORY_MMAP
+```
+
+The GPU process held 19 live dmabuf fds during steady playback (V4L2
+capture rotation + compositor pipeline depth) — bounded, not leaking.
+
+### Caveat — KWin 6.6.4 GLES backend on this hardware
+
+Both pre-patch and post-patch builds stall after a few seconds of
+playback under a KWin Wayland session on this box. Symptom: renderer
++ GPU processes both park in `futex_do_wait`, the `<video>` element
+keeps its ⏸ icon, currentTime advances on the audio clock, and audio
+outputs static (last ALSA buffer recycled) then silence. No D-state,
+no `vb2`/`v4l2`/`dma_fence` wchan, no error in chrome's log.
+
+The journal pinpoints it:
+```
+kwin_wayland: GL_INVALID_VALUE in glTexImage2D(internalFormat=GL_ALPHA)
+kwin_wayland: GL_INVALID_OPERATION in glTexSubImage2D(invalid texture level 0) × N
+```
+First occurrence on this box: **2026-03-06** — entirely preexisting,
+unrelated to chromium-fourier. KWin asks for an internal format that
+doesn't exist in modern GLES (`GL_ALPHA` is GLES1.x legacy, not valid
+for `glTexImage2D` with GLES3 contexts), the allocation fails, every
+subsequent `glTexSubImage2D` errors at level 0, and KWin keeps
+retrying the same broken upload every frame, never recovering. The
+frame-callback ack to wayland clients stalls → chrome's renderer
+parks waiting for present-feedback that never lands.
+
+Triangulation: VLC on the same compositor fails with `cannot convert
+decoder/filter output to any format supported by the output` followed
+by `could not initialize video chain`. mpv `--vo=null
+--hwdec=v4l2request` returns `Could not create device.` ffmpeg
+`-hwaccel v4l2request -f null` plays through clean. The decode path
+is healthy on this box; the wall is the compositor's GL backend.
+
+The chromium-fourier patch series is the right thing on the right
+hardware; the residual stall is a KWin bug that this campaign cannot
+fix from inside chromium. A pivot to identify and patch the offending
+`glTexImage2D(GL_ALPHA)` site in KWin is on the followup list.

@@ -1,0 +1,187 @@
+From: Markus Fritsche <mfritsche@reauktion.de>
+Subject: [PATCH] gpu/ozone: pick GL_TEXTURE_EXTERNAL_OES for NV12 dmabufs whose
+ DRM modifier is advertised external_only by the EGL driver
+Date: 2026-04-28
+
+Background
+----------
+On mainline-Linux Mali GPUs (mesa panfrost / panthor on Bifrost / Valhall)
+every NV12 modifier exposed by `eglQueryDmaBufModifiersEXT` is flagged
+`external_only` — DRM_FORMAT_MOD_LINEAR + ARM AFBC × 2 + ARM AFRC. Mesa's
+behavior is spec-correct: GLES sampling of multi-plane formats is
+defined only via `samplerExternalOES`, never `sampler2D`. The chromium
+NV12 import path at
+`gpu/command_buffer/service/shared_image/ozone_image_gl_textures_holder.cc`
+already chooses `GL_TEXTURE_EXTERNAL_OES` when the SharedImageFormat is
+flagged `PrefersExternalSampler` — but that flag is only set for the
+generic "multi-plane on Linux" case in
+`media/gpu/chromeos/mailbox_video_frame_converter.cc`. Frames that
+arrive with an `external_only`-flagged modifier from a producer that
+didn't set the flag (V4L2 hantro NV12 with AFBC/AFRC capture format on
+RK3588's rkvdec2, future NativePixmap producers, etc.) hit the
+`GL_TEXTURE_2D` path; ANGLE's `validationES.cpp:4894` then rejects YUV
+EGLImages on non-EXTERNAL_OES targets, and the import fails.
+
+This patch closes the gap: the texture-target choice in
+`OzoneImageGLTexturesHolder::GetBinding` now consults the EGL driver's
+`external_only` annotation for the pixmap's actual modifier in addition
+to `format.PrefersExternalSampler()`. If either says "external sampler
+required", the target switches to `GL_TEXTURE_EXTERNAL_OES`. Skia
+Ganesh handles `GL_TEXTURE_EXTERNAL_OES` natively via
+`GrGLTextureInfo.fTarget`, so no shader changes are required. Same
+infrastructure chromium already uses for Android camera / decoder
+dmabufs, retargeted at the Linux ozone layer.
+
+Result is cached per `(fourcc, modifier)` tuple via a function-local
+static `base::flat_map`, so the EGL query is not on the per-frame hot
+path — once per unique format+modifier combination, after which the
+runtime cost is a hash lookup behind a base::Lock.
+
+Bug crbug.com/1498703 is the closest existing tracker; framing this
+upstream as "make Linux NV12 import path consistent with the
+ChromeOS PrefersExternalSampler default" is the right angle.
+
+diff --git a/gpu/command_buffer/service/shared_image/ozone_image_gl_textures_holder.cc b/gpu/command_buffer/service/shared_image/ozone_image_gl_textures_holder.cc
+index 525bdcb0dc..43b0723326 100644
+--- a/gpu/command_buffer/service/shared_image/ozone_image_gl_textures_holder.cc
++++ b/gpu/command_buffer/service/shared_image/ozone_image_gl_textures_holder.cc
+@@ -16,6 +16,7 @@
+ #include "ui/gl/gl_bindings.h"
+ #include "ui/gl/scoped_binders.h"
+ #include "ui/ozone/public/gl_ozone.h"
++#include "ui/ozone/common/native_pixmap_egl_binding.h"
+ #include "ui/ozone/public/native_pixmap_gl_binding.h"
+ #include "ui/ozone/public/ozone_platform.h"
+ #include "ui/ozone/public/surface_factory_ozone.h"
+@@ -82,7 +83,14 @@ std::unique_ptr<ui::NativePixmapGLBinding> GetBinding(
+   // being multiplanar (if using per-plane sampling of a multiplanar texture,
+   // the buffer format passed in here must be the single-planar format of the
+   // plane).
+-  if (format.PrefersExternalSampler()) {
++  // chromium-fourier: also pick GL_TEXTURE_EXTERNAL_OES whenever the
++  // pixmap's DRM modifier is advertised external_only by the EGL
++  // driver. Mesa panfrost / panthor mark every NV12 modifier
++  // external_only — the PrefersExternalSampler flag alone misses
++  // the AFBC / AFRC tiled paths.
++  if (format.PrefersExternalSampler() ||
++      ui::NativePixmapEGLBinding::ModifierRequiresExternalOES(
++          pixmap.get(), plane_format)) {
+     target = GL_TEXTURE_EXTERNAL_OES;
+   } else {
+     target = GL_TEXTURE_2D;
+diff --git a/ui/ozone/common/native_pixmap_egl_binding.cc b/ui/ozone/common/native_pixmap_egl_binding.cc
+index 31877f4459..6855c1093e 100644
+--- a/ui/ozone/common/native_pixmap_egl_binding.cc
++++ b/ui/ozone/common/native_pixmap_egl_binding.cc
+@@ -6,10 +6,13 @@
+ 
+ #include <array>
+ 
++#include "base/containers/flat_map.h"
+ #include "base/logging.h"
+ #include "base/memory/scoped_refptr.h"
++#include "base/no_destructor.h"
+ #include "base/notreached.h"
+ #include "base/numerics/safe_conversions.h"
++#include "base/synchronization/lock.h"
+ #include "ui/gfx/linux/drm_util_linux.h"
+ #include "ui/gl/gl_bindings.h"
+ #include "ui/gl/gl_surface_egl.h"
+@@ -56,6 +59,75 @@ bool NativePixmapEGLBinding::IsSharedImageFormatSupported(
+     viz::SharedImageFormat format) {
+   return GetFourCCFormatFromSharedImageFormat(format) != DRM_FORMAT_INVALID;
+ }
++// static
++bool NativePixmapEGLBinding::ModifierRequiresExternalOES(
++    const gfx::NativePixmap* pixmap,
++    viz::SharedImageFormat format) {
++  // chromium-fourier: query the EGL driver for the (fourcc, modifier)
++  // tuple's external_only flag. Cache results — eglQueryDmaBufModifiersEXT
++  // is a synchronous round-trip into the driver and we want it off the
++  // per-frame hot path. The cache lives for the lifetime of the GPU
++  // process (modifier tables don't change after EGL init).
++  if (!pixmap) {
++    return false;
++  }
++  const uint64_t modifier = pixmap->GetFormatModifier();
++  if (modifier == gfx::NativePixmapHandle::kNoModifier) {
++    // Implicit linear — same answer the driver would give for the
++    // matching LINEAR entry, but cheaper not to query.
++    return false;
++  }
++  const uint32_t fourcc = GetFourCCFormatFromSharedImageFormat(format);
++  if (fourcc == DRM_FORMAT_INVALID) {
++    return false;
++  }
++
++  using Key = std::pair<uint32_t, uint64_t>;
++  static base::NoDestructor<base::Lock> cache_lock;
++  static base::NoDestructor<base::flat_map<Key, bool>> cache;
++  {
++    base::AutoLock lock(*cache_lock);
++    auto it = cache->find({fourcc, modifier});
++    if (it != cache->end()) {
++      return it->second;
++    }
++  }
++
++  bool external_only = false;
++  do {
++    auto* display = gl::GLSurfaceEGL::GetGLDisplayEGL();
++    if (!display || !display->ext->b_EGL_EXT_image_dma_buf_import_modifiers) {
++      break;
++    }
++    EGLDisplay egl_display = display->GetDisplay();
++    EGLint num_modifiers = 0;
++    if (!eglQueryDmaBufModifiersEXT(egl_display, fourcc, 0, nullptr, nullptr,
++                                    &num_modifiers) ||
++        num_modifiers <= 0) {
++      break;
++    }
++    std::vector<EGLuint64KHR> modifiers(num_modifiers);
++    std::vector<EGLBoolean> ext_only(num_modifiers);
++    if (!eglQueryDmaBufModifiersEXT(egl_display, fourcc, num_modifiers,
++                                    modifiers.data(), ext_only.data(),
++                                    &num_modifiers)) {
++      break;
++    }
++    for (EGLint i = 0; i < num_modifiers; ++i) {
++      if (modifiers[i] == modifier) {
++        external_only = (ext_only[i] == EGL_TRUE);
++        break;
++      }
++    }
++  } while (0);
++
++  {
++    base::AutoLock lock(*cache_lock);
++    cache->insert_or_assign({fourcc, modifier}, external_only);
++  }
++  return external_only;
++}
++
+ 
+ // static
+ std::unique_ptr<NativePixmapGLBinding> NativePixmapEGLBinding::Create(
+diff --git a/ui/ozone/common/native_pixmap_egl_binding.h b/ui/ozone/common/native_pixmap_egl_binding.h
+index 61fb0de77f..ad3ac9ced5 100644
+--- a/ui/ozone/common/native_pixmap_egl_binding.h
++++ b/ui/ozone/common/native_pixmap_egl_binding.h
+@@ -27,6 +27,17 @@ class NativePixmapEGLBinding : public NativePixmapGLBinding {
+ 
+   static bool IsSharedImageFormatSupported(viz::SharedImageFormat format);
+ 
++  // chromium-fourier: returns true when |pixmap|'s DRM format modifier
++  // is advertised by the EGL driver as `external_only` for the given
++  // SharedImage format. Used at SharedImage creation time to override
++  // the default GL_TEXTURE_2D target to GL_TEXTURE_EXTERNAL_OES so that
++  // mesa panfrost / panthor NV12 dmabufs (always external_only) import
++  // cleanly via glEGLImageTargetTexture2DOES + samplerExternalOES.
++  // Result is cached per (fourcc, modifier) tuple — the underlying
++  // eglQueryDmaBufModifiersEXT call is not on the per-frame hot path.
++  static bool ModifierRequiresExternalOES(const gfx::NativePixmap* pixmap,
++                                          viz::SharedImageFormat format);
++
+   // Create an EGLImage from a given NativePixmap and plane and bind
+   // |texture_id| to |target| followed by binding the image to |target|. The
+   // color space is for the external sampler: When we sample the YUV buffer as
