@@ -26,13 +26,51 @@ driver), that fence either:
   released to the client; the client's V4L2 capture pool starves;
   hard stall.
 
-## Patch
+## Patches
 
-`0001-transaction-bypass-watchDmaBuf-fence-wait.patch` no-ops the
-function. Every transaction commits without waiting on
-implicit-sync fences for the dmabufs it imports.
+This directory carries **two** patches — the PKGBUILD applies only
+`0001` for now (validated on ohm), while `0002` is the
+upstream-bound shape staged here for later validation and
+submission.
 
-## Why this is *not* the upstream-bound shape
+### `0001-transaction-bypass-watchDmaBuf-fence-wait.patch` *(currently shipped)*
+
+No-ops `Transaction::watchDmaBuf` entirely. Every transaction
+commits without waiting on implicit-sync fences for the dmabufs
+it imports. **Test fixture, validated end-to-end on ohm**: the
+patch unblocks chromium-fourier 1080p30 H.264 playback under KDE
+Plasma 6.6.4 Wayland on RK3566 + panfrost + mainline 6.19.
+
+### `0002-transaction-poll-dmabuf-fd-directly-upstream-shape.patch` *(unvalidated, upstream-bound)*
+
+Rewrites `Transaction::watchDmaBuf` to call `poll(POLLIN)` on the
+dmabuf fd directly via a duplicated fd in a `QSocketNotifier`,
+instead of going through `DMA_BUF_IOCTL_EXPORT_SYNC_FILE` plus a
+sync_file fd. The dma-buf core has supported polling the dmabuf fd
+for implicit-sync write fences since the introduction of the
+feature; the export-then-poll round-trip is per-frame syscall
+overhead with no semantic difference.
+
+This shape preserves KWin's defense — the wait still actually
+*waits* on the producer's fence — while shedding the per-frame
+overhead. It is **not validated yet** and is offered here as the
+shape upstream review will likely converge on. Validation gates
+before swapping the PKGBUILD to apply 0002 instead of 0001:
+
+1. Build kwin-fourier with 0002 instead of 0001 (one PKGBUILD line
+   change).
+2. Install on ohm; restart Plasma session so the new
+   `kwin_wayland` is mapped.
+3. Run chromium-fourier + bbb sample as before. Expectation:
+   plays through end-to-end at the same ~81 % combined CPU.
+   Equivalence with 0001 confirms the upstream shape works
+   without weakening defenses.
+4. Capture before/after `dma_buf_export_sync_file` syscall counts
+   via `strace -c` on `kwin_wayland` (the per-frame syscall savings
+   are the patch's claimed benefit).
+5. Submit to invent.kde.org/plasma/kwin against `master`.
+
+## Why patch 0001 is *not* the upstream-bound shape
 
 Wayland's security model is "compositor trusts no client" —
 watchDmaBuf is a defense against a misbehaving client that attaches

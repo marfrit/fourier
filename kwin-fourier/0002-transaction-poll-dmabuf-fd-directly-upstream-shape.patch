@@ -1,0 +1,123 @@
+From 54e3862be4d2a5b06a48cdcd61065f759a449a61 Mon Sep 17 00:00:00 2001
+From: Markus Fritsche <mfritsche@reauktion.de>
+Date: Tue, 28 Apr 2026 19:32:03 +0000
+Subject: [PATCH] wayland/transaction: poll dmabuf fd directly instead of
+ EXPORT_SYNC_FILE
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Transaction::watchDmaBuf currently calls
+DMA_BUF_IOCTL_EXPORT_SYNC_FILE on every plane of every imported
+dmabuf and parks the transaction on a QSocketNotifier(POLLIN)
+waiting for the resulting sync_file fd to become readable.
+
+This is correct, but unnecessary. The dma-buf core has supported
+poll(POLLIN) on the dmabuf fd directly since the introduction of
+implicit-sync (drivers/dma-buf/dma-buf.c, dma_buf_poll). The
+sync_file we obtain via the ioctl wraps the same set of fences
+that polling the dmabuf fd directly would wait on. The export-
+then-poll round-trip costs:
+
+- one ioctl into the kernel (DMA_BUF_IOCTL_EXPORT_SYNC_FILE)
+- one sync_file allocation + struct + ref-count
+- one dup'd fd we hand to QSocketNotifier
+
+…per fence per plane per frame on every wp_linux_dmabuf-v1 client.
+Skip the round-trip — call ::dup() on the dmabuf fd we already
+have and hand that to TransactionFence directly. Same wait
+semantics, fewer syscalls.
+
+Tested on PineTab2 (RK3566 / Mali-G52 panfrost / mainline 6.19,
+KDE Plasma 6.6.4 Wayland) playing 1080p30 H.264 in chromium.
+Frame rate and CPU profile equivalent to the previous code path;
+the savings are in compositor-loop microseconds, not user-visible
+fps. The motivation is reduced per-frame overhead on
+Mali-class hardware where every saved microsecond compounds across
+multiple wayland clients.
+
+Side effect: removes the dependency on <linux/dma-buf.h> and
+<xf86drm.h> in transaction.cpp, since those were only included
+for DMA_BUF_IOCTL_EXPORT_SYNC_FILE / drmIoctl(). The
+exportWaitSyncFile() helper is removed for the same reason.
+
+Signed-off-by: Markus Fritsche <mfritsche@reauktion.de>
+---
+ src/wayland/transaction.cpp | 39 +++++++++++++------------------------
+ 1 file changed, 14 insertions(+), 25 deletions(-)
+
+diff --git a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
+index 967b22b..f55ea16 100644
+--- a/src/wayland/transaction.cpp
++++ b/src/wayland/transaction.cpp
+@@ -11,11 +11,6 @@
+ #include "wayland/subcompositor.h"
+ #include "wayland/surface_p.h"
+ 
+-#if defined(Q_OS_LINUX)
+-#include <linux/dma-buf.h>
+-#include <xf86drm.h>
+-#endif
+-
+ namespace KWin
+ {
+ 
+@@ -249,41 +244,35 @@ void Transaction::watchSyncObj(TransactionEntry *entry)
+     entry->fences.emplace_back(std::make_unique<TransactionFence>(this, std::move(eventFd)));
+ }
+ 
+-#if defined(Q_OS_LINUX)
+-static FileDescriptor exportWaitSyncFile(const FileDescriptor &fileDescriptor)
+-{
+-    dma_buf_export_sync_file request{
+-        .flags = DMA_BUF_SYNC_READ,
+-        .fd = -1,
+-    };
+-    if (drmIoctl(fileDescriptor.get(), DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &request) == 0) {
+-        return FileDescriptor(request.fd);
+-    }
+-
+-    return FileDescriptor{};
+-}
+-#endif
+-
+ void Transaction::watchDmaBuf(TransactionEntry *entry)
+ {
+-#if defined(Q_OS_LINUX)
+     const DmaBufAttributes *attributes = entry->buffer->dmabufAttributes();
+     if (!attributes) {
+         return;
+     }
+ 
++    // The dma-buf core (drivers/dma-buf/dma-buf.c, dma_buf_poll) lets
++    // userspace poll(POLLIN) on a dmabuf fd directly to wait on the
++    // dmabuf's implicit-sync write fences. Use that primitive rather
++    // than calling DMA_BUF_IOCTL_EXPORT_SYNC_FILE to obtain a separate
++    // sync_file fd on every plane on every imported buffer — the
++    // export-then-wait round-trip is pure overhead per frame, and the
++    // resulting sync_file represents the same set of fences our
++    // QSocketNotifier(POLLIN) on the dmabuf fd would wait on anyway.
++    //
++    // The fd is dup'd because TransactionFence takes ownership and
++    // attributes->fd[i] is owned by the GraphicsBuffer.
+     for (int i = 0; i < attributes->planeCount; ++i) {
+         const FileDescriptor &fileDescriptor = attributes->fd[i];
+         if (fileDescriptor.isReadable()) {
+             continue;
+         }
+ 
+-        auto syncFile = exportWaitSyncFile(fileDescriptor);
+-        if (syncFile.isValid()) {
+-            entry->fences.emplace_back(std::make_unique<TransactionFence>(this, std::move(syncFile)));
++        FileDescriptor dup_fd(::dup(fileDescriptor.get()));
++        if (dup_fd.isValid()) {
++            entry->fences.emplace_back(std::make_unique<TransactionFence>(this, std::move(dup_fd)));
+         }
+     }
+-#endif
+ }
+ 
+ } // namespace KWin
+-- 
+2.47.3
+
